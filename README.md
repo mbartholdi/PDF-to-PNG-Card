@@ -27,9 +27,11 @@ pip3 install -r requirements.txt
 ## How to use
 
 ### Option A — Double-click (easiest)
-Double-click `remove_white_bg.py`. A folder picker will appear — select the folder containing your images. Processed files are saved to an `output/` subfolder inside that folder.
 
-> **Note (Mac):** You may need to right-click → Open the first time due to Gatekeeper.
+**Mac:** Double-click `remove_white_bg.py`. A folder picker will appear.
+> You may need to right-click → Open the first time due to Gatekeeper.
+
+**Windows:** Double-click `run.bat` instead. This keeps the terminal window open so you can see progress and any errors.
 
 ### Option B — Terminal
 ```
