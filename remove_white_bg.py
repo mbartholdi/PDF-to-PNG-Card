@@ -1,14 +1,14 @@
 """
 remove_white_bg.py
 
-Converts PDFs to PNG and/or removes pure white/near-white backgrounds from
-PNG card images by flood-filling from all border pixels, making them
-transparent. Saves results to an 'output/' subfolder.
+Converts PDFs to PNG and/or removes pure white backgrounds from PNG card
+images by flood-filling from all border pixels, making them transparent.
+Saves results to an 'output/' subfolder.
 
 Usage:
-    Double-click the script  →  a folder picker dialog opens
-    python3 remove_white_bg.py            →  runs on the script's own folder
-    python3 remove_white_bg.py <folder>   →  runs on the specified folder
+    python3 remove_white_bg.py <folder>
+
+If no folder is given, runs on the folder where this script lives.
 """
 
 import sys
@@ -18,34 +18,7 @@ import fitz  # PyMuPDF
 from PIL import Image, ImageFilter
 
 
-# ---------------------------------------------------------------------------
-# Folder picker
-# ---------------------------------------------------------------------------
-
-def pick_folder() -> Path:
-    """Open a native folder-picker dialog. Falls back to the script's folder."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        root.lift()
-        root.attributes("-topmost", True)
-        folder = filedialog.askdirectory(title="Select folder containing PNG/PDF card images")
-        root.destroy()
-        if not folder:
-            print("No folder selected — exiting.")
-            sys.exit(0)
-        return Path(folder)
-    except Exception:
-        return Path(__file__).parent
-
-
-# ---------------------------------------------------------------------------
-# Core processing
-# ---------------------------------------------------------------------------
-
-def is_near_white(pixel, tolerance=100):
+def is_near_white(pixel, tolerance=25):
     r, g, b = pixel[:3]
     return r >= 255 - tolerance and g >= 255 - tolerance and b >= 255 - tolerance
 
@@ -55,7 +28,7 @@ def pdf_to_pil(pdf_path: Path) -> list:
     doc = fitz.open(str(pdf_path))
     images = []
     for page in doc:
-        mat = fitz.Matrix(300 / 72, 300 / 72)
+        mat = fitz.Matrix(300 / 72, 300 / 72)  # 300 DPI
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         images.append(img)
@@ -63,14 +36,18 @@ def pdf_to_pil(pdf_path: Path) -> list:
     return images
 
 
-def remove_white(image_path: Path = None, pil_image: Image.Image = None, tolerance: int = 100) -> Image.Image:
-    img = pil_image.convert("RGBA") if pil_image is not None else Image.open(image_path).convert("RGBA")
+def remove_white(image_path: Path = None, pil_image: Image.Image = None, tolerance: int = 25) -> Image.Image:
+    if pil_image is not None:
+        img = pil_image.convert("RGBA")
+    else:
+        img = Image.open(image_path).convert("RGBA")
     pixels = img.load()
     w, h = img.size
 
     visited = set()
     queue = deque()
 
+    # Seed from all border pixels that are near-white
     for x in range(w):
         for y in [0, h - 1]:
             if is_near_white(pixels[x, y], tolerance) and (x, y) not in visited:
@@ -82,10 +59,12 @@ def remove_white(image_path: Path = None, pil_image: Image.Image = None, toleran
                 visited.add((x, y))
                 queue.append((x, y))
 
+    # BFS flood fill — spreads through near-white pixels
     while queue:
         x, y = queue.popleft()
         r, g, b, a = pixels[x, y]
-        pixels[x, y] = (r, g, b, 0)
+        pixels[x, y] = (r, g, b, 0)  # make transparent
+
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
             nx, ny = x + dx, y + dy
             if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
@@ -93,9 +72,37 @@ def remove_white(image_path: Path = None, pil_image: Image.Image = None, toleran
                     visited.add((nx, ny))
                     queue.append((nx, ny))
 
+    # Erode the alpha channel slightly to strip remaining fringe pixels
     alpha = img.getchannel("A")
     alpha = alpha.filter(ImageFilter.MinFilter(3))
     img.putalpha(alpha)
+
+    # Second pass: expand transparency outward through any near-white pixels
+    # adjacent to already-transparent areas. Catches isolated specks the first
+    # flood fill missed. Uses a looser tolerance since it can only spread from
+    # the transparent border region, not from deep inside the card.
+    pixels = img.load()
+    speck_queue = deque()
+    visited2 = set()
+    for y in range(h):
+        for x in range(w):
+            if pixels[x, y][3] == 0:
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited2:
+                        if pixels[nx, ny][3] > 0 and is_near_white(pixels[nx, ny], tolerance=80):
+                            visited2.add((nx, ny))
+                            speck_queue.append((nx, ny))
+    while speck_queue:
+        x, y = speck_queue.popleft()
+        r, g, b, a = pixels[x, y]
+        pixels[x, y] = (r, g, b, 0)
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited2:
+                if pixels[nx, ny][3] > 0 and is_near_white(pixels[nx, ny], tolerance=80):
+                    visited2.add((nx, ny))
+                    speck_queue.append((nx, ny))
 
     return img
 
@@ -104,9 +111,10 @@ def process_folder(folder: Path):
     output_dir = folder / "output"
     output_dir.mkdir(exist_ok=True)
 
-    files = sorted(folder.glob("*.png")) + sorted(folder.glob("*.pdf"))
+    files = [f for f in sorted(folder.glob("*.png")) + sorted(folder.glob("*.pdf"))
+             if not f.name.startswith("._")]
     if not files:
-        print("No PNG or PDF files found in the selected folder.")
+        print("No PNG or PDF files found in folder.")
         return
 
     count = 0
@@ -131,21 +139,17 @@ def process_folder(folder: Path):
             print(f"  Saved → {out_path}")
             count += 1
 
-    print(f"\nDone! {count} file(s) processed → {output_dir}")
+    print(f"\nDone. {count} file(s) processed → {output_dir}")
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         folder = Path(sys.argv[1])
     else:
-        folder = pick_folder()
+        folder = Path(__file__).parent
 
     if not folder.is_dir():
-        print(f"Error: '{folder}' is not a valid folder.")
+        print(f"Error: '{folder}' is not a valid directory.")
         sys.exit(1)
 
     process_folder(folder)
